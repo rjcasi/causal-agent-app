@@ -1,0 +1,8 @@
+<h2>Heartbeat</h2>
+
+<button (click)="loadHeartbeat()">Load Heartbeat</button>
+
+<div *ngIf="loading">Loading...</div>
+<div *ngIf="error">{{ error }}</div>
+
+<pre *ngIf="heartbeat">{{ heartbeat | json }}</pre>

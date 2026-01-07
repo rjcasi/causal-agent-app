@@ -1,0 +1,8 @@
+<h2>Agent Logs</h2>
+
+<button (click)="loadLogs()">Load Logs</button>
+
+<div *ngIf="loading">Loading...</div>
+<div *ngIf="error">{{ error }}</div>
+
+<pre *ngIf="logs">{{ logs | json }}</pre>

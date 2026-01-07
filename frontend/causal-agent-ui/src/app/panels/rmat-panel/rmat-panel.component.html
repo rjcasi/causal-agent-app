@@ -1,10 +1,27 @@
-<div class="panel">
-  <h2>RMAT Causal-Set Panel</h2>
+<div class="rmat-panel">
 
   <button (click)="loadCausal()">Load RMAT Causal Data</button>
 
-  <div *ngIf="loading">Loading...</div>
-  <div *ngIf="error">{{ error }}</div>
+  <div *ngIf="loading" class="loading">
+    Loading causal-set data...
+  </div>
 
-  <pre *ngIf="causalData">{{ causalData | json }}</pre>
+  <div *ngIf="error" class="error">
+    {{ error }}
+  </div>
+
+  <div *ngIf="causalData" class="data-block">
+    <h3>Events</h3>
+    <pre>{{ causalData.events | json }}</pre>
+
+    <h3>Relations</h3>
+    <pre>{{ causalData.relations | json }}</pre>
+
+    <h3>Chains</h3>
+    <pre>{{ causalData.chains | json }}</pre>
+
+    <h3>Antichains</h3>
+    <pre>{{ causalData.antichains | json }}</pre>
+  </div>
+
 </div>
