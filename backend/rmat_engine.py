@@ -1,156 +1,217 @@
+# backend/rmat_engine.py
+
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import List, Dict, Any
-from datetime import datetime
+from dataclasses import dataclass
+from typing import List, Optional
+import math
+import random
+
+from causal_set import CausalSet
 
 
 @dataclass
 class RMATState:
-    timestep: int = 0
-
-    # Causal set (very simple: adjacency counts)
-    causal_matrix: List[List[float]] = field(default_factory=list)
-
-    # Spike layer (simple list of activations)
-    spikes: List[float] = field(default_factory=list)
-
-    # Flow, density, phase-space projections (1D for now)
-    flow: List[float] = field(default_factory=list)
-    density: List[float] = field(default_factory=list)
-    phase_space: List[float] = field(default_factory=list)
-
-    # Recursive attention tensor (flattened view)
-    attention: List[float] = field(default_factory=list)
+    timestep: int
+    spikes: List[float]
+    density: List[float]
+    attention: List[float]
+    phase_space: List[float]  # concatenated [position..., momentum...]
 
 
 class RecursiveMatrixAttentionTensor:
     """
-    RMAT: a simplified, evolving core.
-    This is the 'brainstem' we can deepen later with real math.
+    RMAT: a small, self-contained "organ" that:
+    - evolves spikes, density, attention, and phase-space
+    - grows a CausalSet one event per step
+    - uses spike + attention to shape causal growth
     """
 
-    def __init__(self, size: int = 4):
+    def __init__(self, size: int = 4) -> None:
         self.size = size
-        self.state = self._init_state()
-
-    def _init_state(self) -> RMATState:
-        n = self.size
-        return RMATState(
+        self.state = RMATState(
             timestep=0,
-            causal_matrix=[[0.0 for _ in range(n)] for _ in range(n)],
-            spikes=[0.0 for _ in range(n)],
-            flow=[0.0 for _ in range(n)],
-            density=[0.0 for _ in range(n)],
-            phase_space=[0.0 for _ in range(2 * n)],
-            attention=[0.0 for _ in range(n)],
+            spikes=[0.0] * size,
+            density=[0.0] * size,
+            attention=[0.0] * size,
+            phase_space=[0.0] * (2 * size),
         )
+        # Causal set organ
+        self.causal = CausalSet()
 
-    def _stdp_update(self, spikes: List[float]) -> List[float]:
-        # Simple STDP-like update: strengthen active spikes, decay others
-        return [
-            s * 0.95 + 0.1 if s > 0.2 else s * 0.9
-            for s in spikes
-        ]
+        # initialize with one "genesis" event
+        self.causal.add_event()
 
-    def _flow_update(self, flow: List[float]) -> List[float]:
-        # Simple flow: shift and decay
-        if not flow:
-            return flow
-        shifted = flow[1:] + [flow[0]]
-        return [0.9 * x for x in shifted]
+    # ------------------------------
+    # PUBLIC API
+    # ------------------------------
 
-    def _density_update(self, density: List[float], spikes: List[float]) -> List[float]:
-        # Density responds to spikes, then diffuses slightly
-        return [
-            0.8 * d + 0.3 * s
-            for d, s in zip(density, spikes)
-        ]
+    def as_dict(self) -> dict:
+        return {
+            "timestep": self.state.timestep,
+            "spikes": self.state.spikes,
+            "density": self.state.density,
+            "attention": self.state.attention,
+            "phase_space": self.state.phase_space,
+        }
 
-    def _phase_space_update(self, phase_space: List[float], attention: List[float]) -> List[float]:
-        # Interpret phase_space as [position..., momentum...]
-        n = len(phase_space) // 2
-        pos = phase_space[:n]
-        mom = phase_space[n:]
-
-        pos = [p + 0.05 * a for p, a in zip(pos, attention)]
-        mom = [m * 0.95 + 0.02 * a for m, a in zip(mom, attention)]
-
-        return pos + mom
-
-    def _recursive_attention(self, state: RMATState) -> List[float]:
+    def step(self, external_input: Optional[List[float]] = None) -> RMATState:
         """
-        Very simplified 'R(A) = A - mu(A) + zeta(A) - gamma(A)' idea,
-        implemented as local/global mixing.
+        Advance the RMAT by one timestep:
+        - update spikes, density, attention, phase_space
+        - grow the causal set (Smolin-style causal growth)
         """
-        att = state.attention
-        if not att:
-            return att
+        self.state.timestep += 1
 
-        avg = sum(att) / len(att)
-        # 'mu' inversion-ish: center around average
-        centered = [a - avg for a in att]
+        # 1. Update spikes (simple leaky integration + external input)
+        new_spikes = []
+        for i in range(self.size):
+            base = self.state.spikes[i] * 0.7
+            ext = 0.0
+            if external_input and i < len(external_input):
+                ext = external_input[i]
+            val = base + 0.3 * ext
+            # simple nonlinearity
+            val = max(0.0, min(1.0, val))
+            new_spikes.append(val)
 
-        # 'zeta' accumulation-ish: running sum influence
-        running = []
-        total = 0.0
-        for c in centered:
-            total += c
-            running.append(total)
+        # 2. Update density (slow averaging of spikes)
+        new_density = []
+        for i in range(self.size):
+            d = 0.9 * self.state.density[i] + 0.1 * new_spikes[i]
+            new_density.append(d)
 
-        # 'gamma' normalization-ish: squash
-        max_abs = max(abs(x) for x in running) or 1.0
-        return [x / max_abs for x in running]
+        # 3. Update attention (recursive function of spikes + density)
+        new_attention = []
+        for i in range(self.size):
+            a_prev = self.state.attention[i]
+            s = new_spikes[i]
+            d = new_density[i]
+            a = 0.8 * a_prev + 0.1 * s + 0.1 * (d - 0.5)
+            new_attention.append(max(-1.0, min(1.0, a)))
 
-    def step(self, external_input: List[float] | None = None) -> RMATState:
-        """
-        Advance the RMAT one timestep.
-        external_input can be interpreted as new spikes.
-        """
-        s = self.state
-        n = self.size
+        # 4. Update phase-space (toy Hamiltonian-like evolution)
+        new_phase = self._update_phase_space(new_spikes, new_attention)
 
-        if external_input is None:
-            external_input = [0.0 for _ in range(n)]
-        else:
-            external_input = list(external_input)[:n] + [0.0] * max(0, n - len(external_input))
+        self.state.spikes = new_spikes
+        self.state.density = new_density
+        self.state.attention = new_attention
+        self.state.phase_space = new_phase
 
-        # Update spikes with external input + STDP-like rule
-        new_spikes = [max(0.0, min(1.0, es + 0.5 * inp)) for es, inp in zip(s.spikes, external_input)]
-        new_spikes = self._stdp_update(new_spikes)
+        # 5. Grow the causal set according to spike + attention
+        self._grow_causal_set()
 
-        # Update flow and density based on spikes
-        new_flow = self._flow_update(s.flow)
-        new_density = self._density_update(s.density, new_spikes)
-
-        # Update phase space based on attention
-        new_attention = [0.6 * a + 0.4 * s for a, s in zip(s.attention, new_spikes)] if s.attention else new_spikes[:]
-        new_phase_space = self._phase_space_update(s.phase_space, new_attention)
-
-        # Recursive attention refinement
-        tmp_state = RMATState(
-            timestep=s.timestep + 1,
-            causal_matrix=s.causal_matrix,  # we’ll evolve this later
-            spikes=new_spikes,
-            flow=new_flow,
-            density=new_density,
-            phase_space=new_phase_space,
-            attention=new_attention,
-        )
-        refined_attention = self._recursive_attention(tmp_state)
-        tmp_state.attention = refined_attention
-
-        self.state = tmp_state
         return self.state
 
-    def as_dict(self) -> Dict[str, Any]:
-        s = self.state
-        return {
-            "timestep": s.timestep,
-            "size": self.size,
-            "spikes": s.spikes,
-            "flow": s.flow,
-            "density": s.density,
-            "phase_space": s.phase_space,
-            "attention": s.attention,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-        }
+    # ------------------------------
+    # INTERNAL DYNAMICS
+    # ------------------------------
+
+    def _update_phase_space(self, spikes: List[float], attention: List[float]) -> List[float]:
+        """
+        Very simple phase-space evolution:
+        - positions x_i, momenta p_i
+        - x' = x + p
+        - p' = p + force(spikes, attention)
+        """
+        half = self.size
+        x = self.state.phase_space[:half]
+        p = self.state.phase_space[half:]
+
+        new_x = []
+        new_p = []
+
+        for i in range(self.size):
+            xi = x[i]
+            pi = p[i]
+
+            # force as function of spike/attention
+            force = 0.2 * spikes[i] + 0.1 * attention[i]
+
+            xi_new = xi + pi
+            pi_new = 0.9 * pi + force
+
+            new_x.append(xi_new)
+            new_p.append(pi_new)
+
+        return new_x + new_p
+
+    def _grow_causal_set(self) -> None:
+        """
+        Smolin-inspired causal growth:
+        - each step adds a new event
+        - parents chosen probabilistically based on spikes + attention
+        """
+
+        # Create a new event for this timestep
+        eid = self.causal.add_event()
+
+        # If this is the first event, nothing to connect
+        if eid == 0:
+            return
+
+        # Build weights from all previous events
+        weights = []
+        prev_events = list(range(eid))
+        for ev in prev_events:
+            idx = ev % self.size
+            s = self.state.spikes[idx]
+            a = self.state.attention[idx]
+            w = max(0.0, 0.7 * s + 0.3 * (a + 1.0) / 2.0)  # a in [-1,1] -> [0,1]
+            weights.append(w)
+
+        total = sum(weights)
+
+        if total <= 0:
+            # no strong parents -> leave event almost isolated
+            # optionally connect to immediate predecessor
+            self.causal.add_relation(eid - 1, eid)
+            return
+
+        # normalize to probabilities
+        probs = [w / total for w in weights]
+
+        # sample between 1 and 3 parents
+        num_parents = random.randint(1, min(3, len(prev_events)))
+
+        parents = self._sample_parents(prev_events, probs, num_parents)
+
+        for p in parents:
+            self.causal.add_relation(p, eid)
+
+    def _sample_parents(
+        self,
+        events: List[int],
+        probs: List[float],
+        k: int,
+    ) -> List[int]:
+        """
+        Weighted sampling without replacement.
+        """
+        chosen = []
+        available = events[:]
+        p = probs[:]
+
+        for _ in range(k):
+            if not available:
+                break
+            r = random.random()
+            cumulative = 0.0
+            idx = 0
+            for i, prob in enumerate(p):
+                cumulative += prob
+                if r <= cumulative:
+                    idx = i
+                    break
+            chosen_event = available[idx]
+            chosen.append(chosen_event)
+
+            # remove chosen
+            del available[idx]
+            del p[idx]
+
+            # renormalize remaining
+            s = sum(p)
+            if s > 0:
+                p = [x / s for x in p]
+
+        return chosen

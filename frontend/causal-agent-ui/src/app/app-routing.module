@@ -1,0 +1,4 @@
+{
+  path: 'rmat',
+  component: RmatPanelComponent
+}
