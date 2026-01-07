@@ -1,0 +1,10 @@
+<div class="panel">
+  <h2>RMAT Causal-Set Panel</h2>
+
+  <button (click)="loadCausal()">Load RMAT Causal Data</button>
+
+  <div *ngIf="loading">Loading...</div>
+  <div *ngIf="error">{{ error }}</div>
+
+  <pre *ngIf="causalData">{{ causalData | json }}</pre>
+</div>
